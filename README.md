@@ -56,6 +56,100 @@ Free-tool stand-ins for common cloud pieces:
 | ADF triggers / Airflow | `pipeline.py` CLI and an optional Airflow DAG |
 | Azure DevOps pipelines | GitHub Actions |
 
+### 2.1 Pipeline flow (Mermaid, renders on GitHub)
+
+```mermaid
+flowchart LR
+    L[Landing files<br/>CSV + JSONL] --> B[Bronze Delta<br/>raw strings + lineage]
+    B --> R{DQ rules}
+    R -- pass --> S[Silver Delta<br/>typed, deduped, MERGE]
+    R -- fail --> Q[Quarantine Delta<br/>+ failed rule names]
+    S --> G[Gold Delta<br/>star schema]
+    G --> X[Parquet export]
+    Q --> X
+    X --> W[(DuckDB<br/>core + quarantine)]
+    W --> M[SQL marts<br/>+ dq_summary]
+    ST[(state.json<br/>manifest + watermarks)] -.-> B
+    ST -.-> R
+```
+
+### 2.2 Gold data model (star schema)
+
+One fact table at **order-line grain** (one row per item on an order) surrounded by four dimensions.
+Dimension keys are deterministic `xxhash64` hashes of the business ID. `dim_customer` also contains an
+**unknown member** row (`customer_key = -1`) so facts with an unmatched customer are kept, not dropped.
+
+```mermaid
+erDiagram
+    DIM_CUSTOMER ||--o{ FACT_SALES : customer_key
+    DIM_PRODUCT  ||--o{ FACT_SALES : product_key
+    DIM_STORE    ||--o{ FACT_SALES : store_key
+    DIM_DATE     ||--o{ FACT_SALES : date_key
+
+    FACT_SALES {
+        string order_id
+        int line_no
+        date order_date
+        int date_key FK
+        bigint customer_key FK
+        bigint product_key FK
+        bigint store_key FK
+        string status
+        boolean is_cancelled
+        int qty
+        decimal unit_price
+        decimal discount_pct
+        decimal gross_amount
+        decimal discount_amount
+        decimal net_amount
+    }
+    DIM_CUSTOMER {
+        bigint customer_key PK
+        string customer_id
+        string name
+        string email
+        string city
+        string segment
+        date signup_date
+    }
+    DIM_PRODUCT {
+        bigint product_key PK
+        string product_id
+        string sku
+        string category
+        string brand
+        decimal mrp
+    }
+    DIM_STORE {
+        bigint store_key PK
+        string store_id
+        string city
+        string region
+        string format
+    }
+    DIM_DATE {
+        int date_key PK
+        date date
+        int year
+        int month
+        string month_name
+        int day
+        string day_name
+        boolean is_weekend
+    }
+```
+
+| Table | Grain | Built from | Notes |
+|---|---|---|---|
+| `fact_sales` | one order line | silver `order_items` joined to silver `orders` | `gross = qty x unit_price`, `discount = gross x discount_pct / 100`, `net = gross - discount`; cancelled orders are kept and flagged |
+| `dim_customer` | one customer | silver `customers` + unknown member | `customer_key = -1` is "Unknown" |
+| `dim_product` | one product | silver `products` | category is title-cased in silver |
+| `dim_store` | one store | silver `stores` | |
+| `dim_date` | one calendar day | min to max order date | weekend flag, month and day names |
+
+Warehouse tables are the same names under the `core` schema. Silver rejects live in the `quarantine` schema and the
+reports in `marts`.
+
 ## 3. What each layer does
 
 ### Generate (`generate_data.py`)
@@ -174,15 +268,45 @@ docs/                         ganit-analysis.md, exercises.md
 .github/workflows/ci.yml      tests + end-to-end smoke run
 ```
 
-## 7. Design choices worth knowing
+## 7. Design decisions
 
-- **Why quarantine instead of dropping bad rows?** Nothing is lost silently and quality is measurable.
-- **Why a watermark and a manifest?** Re-running is safe and cheap; bronze never ingests the same file twice.
-- **Why MERGE plus a stale guard?** Late-arriving updates are normal; older data must not overwrite newer.
-- **Why deterministic surrogate keys?** Idempotent rebuilds, and keys are consistent across tables without lookups.
-- **Known simplifications:** full overwrite for gold (no incremental gold); no SCD2; if a re-sent order has a
-  different number of lines the old extra lines are not removed; state lives in a JSON file rather than a table.
-  Several of these are exercises.
+Decisions made while building this project, with the reason and the trade-off.
+
+| # | Decision | Why | Trade-off / alternative |
+|---|---|---|---|
+| 1 | **Medallion layers** (bronze, silver, gold) | Separates raw history, cleaned data and business models; each layer can be rebuilt from the one before | More storage and more steps than a single ETL script |
+| 2 | **PySpark + Delta Lake locally** | Same APIs as Databricks, so the skills transfer; Delta gives MERGE, history and time travel | Needs Java and a Maven jar download on first run |
+| 3 | **Bronze keeps everything as strings, append-only** | A bad value can never make ingestion fail, and raw history is replayable | Typing and cleaning are pushed to silver |
+| 4 | **Explicit schema for order JSON** | Stable, predictable reads; no surprises from schema inference | New source fields need a schema change |
+| 5 | **Manifest of ingested files** (file path + size) in `state.json` | Re-runs never load a file twice (metadata-driven ingestion, like ADF) | A file rewritten with the same size would be skipped; a real platform would use a control table or checksums |
+| 6 | **Silver watermark on `_batch_id`** | Each run processes only new bronze batches; the batch id is a sortable timestamp string, so no timestamp-timezone pitfalls | Two batches in the same microsecond would collide (practically impossible here) |
+| 7 | **Declarative DQ rules + quarantine** | Nothing is silently dropped, every rejected row says which rule it broke, and quality is measurable (`dq_summary`) | Rules are Python, not a separate tool like Great Expectations or dbt tests |
+| 8 | **DQ runs before de-duplication** | A null key can never be collapsed into one "winner" row and lost | An invalid older duplicate also lands in quarantine |
+| 9 | **De-duplicate with a window function** (latest `updated_at`, then batch) | Late status updates win over earlier versions | Needs a reliable `updated_at` from the source |
+| 10 | **MERGE upserts with a stale-update guard** (`s.updated_at >= t.updated_at`) | Idempotent loads; an old record can never overwrite a newer one | If a re-sent order has fewer lines, the extra old lines are not deleted |
+| 11 | **Orders split into header + `order_items`** (`posexplode`) | Gives a clean line-level grain for the fact table | Items for a quarantined header are not processed |
+| 12 | **Product existence checked in silver** | Orphan items are caught early, before they reach the fact table | Requires products to load before orders (enforced by stage order) |
+| 13 | **Deterministic surrogate keys** (`xxhash64`) | Rebuilds produce identical keys; no lookup tables or sequences needed | Tiny theoretical collision risk; not human-readable |
+| 14 | **Unknown member row** in `dim_customer` | Orders with an unmatched customer still count in totals | Only customers get one, because products and stores are validated in silver |
+| 15 | **Gold rebuilt with full overwrite** | Simple and correct at this size | Not incremental; real projects would partition or merge |
+| 16 | **Gold exported as parquet, then loaded into DuckDB** | DuckDB reads parquet natively; avoids installing a Delta extension (needs network) | An extra export step and storage copy |
+| 17 | **DuckDB as the warehouse** | Free, zero setup, SQL dialect close to Snowflake/BigQuery | Single-process, no concurrency or access control |
+| 18 | **Marts as plain `.sql` files run in filename order** | Version-controlled, reviewable SQL (the dbt/Dataform habit) without needing dbt | No dependency graph or built-in tests; porting to dbt is an exercise |
+| 19 | **`dq_summary` built in Python** | It must union whichever quarantine tables exist | Slightly harder to read than a static SQL file |
+| 20 | **`timeParserPolicy=CORRECTED`, session time zone UTC** | Unparseable dates become NULL (so DQ catches them) instead of raising; results are the same on any machine | Hides parser changes between Spark versions |
+| 21 | **Pinned PySpark 3.5.3, delta-spark 3.2.1, Python below 3.13** | Known compatible versions | Needs Python 3.10-3.12 and Java 17; upgrade to Spark 4 later |
+| 22 | **CLI as the main orchestrator; Airflow DAG optional** | One code path for local runs, CI and Airflow; no heavy setup | Airflow DAG is not covered by CI |
+| 23 | **Deterministic synthetic data generator** (standard library only) | Reproducible bugs and tests; no external data downloads | Problems are artificial, so real data will surprise you more |
+| 24 | **GitHub Actions CI** (unit tests + small end-to-end run) | Mirrors a client CI/CD pipeline (Azure DevOps equivalent) and catches Spark problems early | Spark start-up makes the run take a few minutes |
+
+### Known limitations
+
+- No slowly changing dimensions (customer city or segment changes overwrite history); see exercise 5.
+- Gold is rebuilt in full each run rather than incrementally.
+- State is a JSON file, not a control table; fine for one machine, not for concurrent runs.
+- The Spark, Delta and DuckDB stages were not executed in the environment where the code was written; the CI
+  smoke run is the first real check.
+- No cloud-specific pieces (Unity Catalog, IAM, secrets, cluster sizing).
 
 ## 8. Where to go next
 
