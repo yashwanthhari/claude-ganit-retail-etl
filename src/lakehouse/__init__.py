@@ -1,0 +1,1 @@
+"""Retail lakehouse practice project."""

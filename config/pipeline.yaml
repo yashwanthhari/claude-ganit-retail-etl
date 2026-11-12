@@ -1,0 +1,27 @@
+# Paths are relative to the project root. Think of each as a cloud location:
+#   landing -> raw files dropped by source systems (ADLS/S3 "landing" container)
+#   bronze / silver / gold -> Delta tables in the lakehouse
+#   export -> parquet snapshots of gold + quarantine, loaded into the warehouse
+#   warehouse -> DuckDB file (stand-in for Snowflake / BigQuery / Synapse)
+paths:
+  landing: data/landing
+  bronze: data/lake/bronze
+  silver: data/lake/silver
+  gold: data/lake/gold
+  export: data/lake/export
+  state: data/lake/_state
+  warehouse: data/warehouse/retail.duckdb
+
+generator:
+  seed: 42
+  start_date: "2026-01-01"
+  days: 14
+  customers: 2000
+  products: 150
+  stores: 20
+  orders_per_day: 300
+
+spark:
+  app_name: retail-lakehouse
+  driver_memory: 2g
+  shuffle_partitions: 4

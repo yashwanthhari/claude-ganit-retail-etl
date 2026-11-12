@@ -1,0 +1,26 @@
+name: ci
+
+# GitHub Actions is free for public repos. It plays the role Azure DevOps pipelines
+# would play on a client project: run tests on every push, then smoke-test the pipeline.
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - name: Unit tests
+        run: python -m pytest -q
+      - name: End-to-end smoke run (small dataset)
+        run: python -m lakehouse.pipeline --days 3 --orders-per-day 100 generate bronze silver gold warehouse report

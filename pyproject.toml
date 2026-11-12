@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "retail-lakehouse-lab"
+version = "0.1.0"
+description = "Local, free practice project mirroring a Spark/Delta/warehouse data engineering stack"
+readme = "README.md"
+# pyspark 3.5 does not support Python 3.13 yet
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "pyspark==3.5.3",
+    "delta-spark==3.2.1",
+    "duckdb>=1.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+orchestration = ["apache-airflow>=2.9"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
