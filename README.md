@@ -1,4 +1,4 @@
-# Retail Lakehouse Lab
+# claude-ganit-retail-etl (Retail Lakehouse Lab)
 
 A small but realistic data-engineering project to get comfortable with the kind of stack and flow used on
 consulting data-platform projects: **PySpark + Delta Lake medallion pipeline, a SQL warehouse, data-quality
@@ -47,8 +47,8 @@ and status changes that arrive a day late.
 ## Quick start
 
 ```bash
-git clone <your-repo-url> ganit-retail-lakehouse-lab
-cd ganit-retail-lakehouse-lab
+git clone <your-repo-url> claude-ganit-retail-etl
+cd claude-ganit-retail-etl
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 

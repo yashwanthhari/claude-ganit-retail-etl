@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "retail-lakehouse-lab"
+name = "claude-ganit-retail-etl"
 version = "0.1.0"
 description = "Local, free practice project mirroring a Spark/Delta/warehouse data engineering stack"
 readme = "README.md"
